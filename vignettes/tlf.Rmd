@@ -1,0 +1,228 @@
+# Create TLFs
+
+In this document, we illustrate a way to generate TLFs by using the metadata created by `metalite`.
+The goal is to provide an easy-to-follow example instead of a comprehensive production ready work.
+We present the workflow by using the specific adverse events tables.
+
+## Construct data
+
+For a typical adverse events analysis, the AE records are saved in `ADAE` (observation level)
+and the subject information is saved in `ADSL` (population level).
+With demo ADaM datasets in the `r2rtf` package, we can construct an object as below using `meta_adam`.
+
+```{r}
+meta_adam(
+  observation = r2rtf_adae,
+  population = r2rtf_adsl %>% rename(TRTA = TRT01A)
+)
+```
+
+## Create analysis plan
+
+We also need to define the analysis plan for the adverse events analysis,
+specifically, the details of each table, listing and figure (TLF):
+including analysis population, observations, and parameters.
+
+Here we use functions: `expand_plan` and `combine_plan` to create an analysis plan.
+The analysis plan is a dataframe that indicates the specification of each TLF.
+In the plan below, we construct 6 TLFs based on different combination of
+population, observation and parameter.
+
+```{r}
+plan <- list()
+
+plan[[1]] <- expand_plan(
+  analysis = "apr_tlf_ae_specific", ## analysis should match function name for TLFs
+  population = "apat",
+  observation = c("wk12", "wk24"),
+  parameter = c("any", "rel", "ser"), ## label for different specific AE TLFs
+  ## ae_var is global variable and one of arguments in the TLF function
+  ae_var = "AEDECOD"
+)
+
+plan <- combine_plan(plan)
+
+plan
+```
+
+Then, we can define the analysis plan using `define_plan`
+and specify population, observation and parameters.
+The TLF-specific arguments could be added to `define_parameter` level
+to make them available in `meta`.
+The default values for `parameter = c("any","rel","ser")`
+could be found by using `collect_adam_mapping()`.
+The changes could be made to override the default.
+
+```{r}
+meta <- meta_adam(
+  population = r2rtf_adsl %>% rename(TRTA = TRT01A),
+  observation = r2rtf_adae
+) %>%
+  define_plan(plan = plan) %>%
+  define_population(
+    name = "apat",
+    group = "TRTA",
+    group_order = c(
+      "High Dose" = "Xanomeline High Dose",
+      "Placebo" = "Placebo"
+    ),
+    subset = SAFFL == "Y"
+  ) %>%
+  define_observation(
+    name = "wk12",
+    group = "TRTA",
+    group_order = c(
+      "High Dose" = "Xanomeline High Dose",
+      "Placebo" = "Placebo"
+    ),
+    ae_var = "AEDECOD",
+    var = c("AEREL", "AESER"),
+    subset = SAFFL == "Y" & TRTEMFL == "Y",
+    label = "Weeks 0 to 12"
+  ) %>%
+  define_observation(
+    name = "wk24",
+    group = "TRTA",
+    group_order = c(
+      "High Dose" = "Xanomeline High Dose",
+      "Placebo" = "Placebo"
+    ),
+    ae_var = "AEDECOD",
+    var = c("AEREL", "AESER"),
+    subset = AOCC02FL == "Y",
+    label = "Weeks 0 to 24"
+  ) %>%
+  define_parameter(
+    name = "any",
+    end_notes = c("[adam-adsl; adae]")
+  ) %>%
+  define_parameter(
+    name = "rel",
+    subset = quote(AEREL %in% c("POSSIBLE", "PROBABLE")),
+    label = "drug-realted adverse events",
+    end_notes = c("[adam-adsl; adae]")
+  ) %>%
+  define_parameter(
+    name = "ser",
+    subset = quote(AESER == "Y"),
+    label = "serious adverse events",
+    end_notes = c(
+      "Serious adverse events up to 90 days of last dose are included.",
+      "[adam-adsl; adae]"
+    )
+  ) %>%
+  define_analysis(
+    name = "apr_tlf_ae_specific", label = "Table: Specific AE",
+    title = "Participants With {term1} Adverse Events {term2}"
+  ) %>%
+  meta_build()
+
+meta$plan
+```
+
+## Add additional arguments to defined plan
+
+For additional arguments, we can directly add them to the plan.
+
+```{r}
+meta$plan <- meta$plan %>%
+  mutate(
+    display_total = rep(c(FALSE, TRUE), 3),
+    display_ci = rep(c(TRUE, FALSE), 3)
+  )
+
+meta$plan
+```
+
+## Create function call program
+
+```{r}
+spec_call_program(meta)
+```
+
+## Write a protocol-specific function and execute the call program
+
+To change the standard function to protocol level function,
+we write the below wrap function by adding `meta` plan arguments,
+and also provide information from `meta` plan into the function
+by using `collect_xxx` functions in `metalite`.
+
+```{r}
+save.path <- "tlf"
+
+apr_tlf_ae_specific <- function(meta, population, observation, parameter, ...) {
+
+  # select population
+  pop <- collect_population_record(meta = meta, population = population)
+
+  # select observation
+  ae_var <- collect_adam_mapping(meta = meta, name = observation)$ae_var
+  var <- collect_adam_mapping(meta = meta, name = observation)$var
+
+  # get the group variable
+  obs_group <- collect_adam_mapping(meta = meta, name = observation)$group
+  obs_group_label <- eval(collect_adam_mapping(meta, observation)$group_order)
+
+  obs <- collect_observation_record(meta,
+    population = population,
+    observation = observation,
+    parameter = parameter,
+    var = c(ae_var, var)
+  )
+
+  output_name <- paste0(gsub(
+    "[-_ ]", "0",
+    paste(
+      as.character(as.list(match.call())[[1]]),
+      observation, parameter
+    )
+  ), ".rtf")
+
+  forestly::tlf_ae_specific(
+    population_from = pop,
+    population_where = deparse(collect_adam_mapping(meta, population)$subset),
+    observation_from = obs,
+    observation_where = deparse(collect_adam_mapping(meta, observation)$subset),
+    treatment_var = obs_group,
+    treatment_order = obs_group_label,
+    end_notes = eval(collect_adam_mapping(meta, parameter)$end_notes),
+    title_text = collect_title(meta, population, observation, parameter,
+      analysis = as.character(as.list(match.call())[[1]])
+    ),
+    subtitle_text = NULL,
+    ae_grp = NULL,
+    stratum_var = NULL,
+    output_report = file.path(save.path, output_name), ...
+  )
+}
+```
+
+Finally we execute the call programs to generate outputs,
+
+```{r, message=FALSE, warning=FALSE}
+meta_run(meta)
+```
+
+The TLFs generated above are stored in the folder specified in `save_path`, which can be combined into one .rtf file via the following code.
+
+```{r}
+# Combine multiple RTFs into one RTF
+all_mockup_tbl <- list.files("tlf", pattern = ".rtf", full.names = TRUE)
+
+metalite::rtf_assemble(all_mockup_tbl) %>%
+  r2rtf::write_rtf("assemble/combine-tlf.rtf")
+```
+
+```{r, message=FALSE, warning=FALSE,eval = FALSE}
+r2rtf:::rtf_convert_format(
+  input = "assemble/combine-tlf.rtf",
+  output_dir = "assemble/",
+  format = "pdf"
+)
+```
+
+In this example, we generated in total 6 tables that have been combined to one file in the pre-view mode.
+
+```{r, out.width = "100%", out.height = "600px", echo = FALSE, fig.align = "center"}
+knitr::include_graphics("assemble/combine-tlf.pdf")
+```
